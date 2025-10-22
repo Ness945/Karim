@@ -1,7 +1,15 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { PieChart, Pie, Cell, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar } from 'recharts';
 import { Users, Clock, History, Shield, X, MessageSquare, Upload, Filter, TrendingUp, Home, Eye } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import {
+  BD_HEADER_OFFSET,
+  BD_SHEET_NAME,
+  buildCdEntries,
+  collectUniqueNames,
+  deriveDefaultDateRange,
+  formatAsInputDate
+} from './utils/cdHelpers';
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState('accueil');
@@ -35,16 +43,13 @@ export default function Dashboard() {
       try {
         const data = new Uint8Array(e.target.result);
         const workbook = XLSX.read(data, { cellDates: true });
-        const sheetBD = workbook.Sheets['BD'];
+        const sheetBD = workbook.Sheets[BD_SHEET_NAME];
         if (!sheetBD) { setUploadError("La feuille 'BD' n'a pas été trouvée"); setIsLoading(false); return; }
         const dataArray = XLSX.utils.sheet_to_json(sheetBD, { defval: null, raw: false, header: 1 });
-        const dataRows = dataArray.slice(3);
-        const dates = dataRows.map((row) => row?.[4]).map((d) => (d instanceof Date ? d : new Date(d))).filter((d) => d && !isNaN(d?.getTime?.()));
-        const sortedDates = dates.sort((a, b) => a - b);
-        const maxDate = sortedDates[sortedDates.length - 1];
-        const sixMonthsBefore = new Date(maxDate);
-        sixMonthsBefore.setMonth(maxDate.getMonth() - 6);
-        setDateRange({ start: sixMonthsBefore.toISOString().split('T')[0], end: maxDate.toISOString().split('T')[0] });
+        const dataRows = dataArray.slice(BD_HEADER_OFFSET);
+        const defaultRange = deriveDefaultDateRange(dataRows);
+        if (!defaultRange) { setUploadError("Aucune date valide n'a été trouvée dans la feuille 'BD'"); setIsLoading(false); return; }
+        setDateRange(defaultRange);
         setRawData(dataRows);
       } catch (err) { setUploadError('Erreur lors du traitement du fichier'); }
       finally { setIsLoading(false); }
@@ -59,19 +64,12 @@ export default function Dashboard() {
         if (!window?.fs?.readFile) return;
         const response = await window.fs.readFile('Copie News 2024 BDCD 2014 3.xlsx');
         const workbook = XLSX.read(response, { cellDates: true });
-        const sheetBD = workbook.Sheets['BD'];
+        const sheetBD = workbook.Sheets[BD_SHEET_NAME];
         if (!sheetBD) return;
         const dataArray = XLSX.utils.sheet_to_json(sheetBD, { defval: null, raw: false, header: 1 });
-        const dataRows = dataArray.slice(3);
-        const dates = dataRows.map((row) => row?.[4]).map((d) => (d instanceof Date ? d : new Date(d))).filter((d) => d && !isNaN(d?.getTime?.()));
-        if (dates.length) {
-          const sortedDates = dates.sort((a, b) => a - b);
-          const maxDate = sortedDates[sortedDates.length - 1];
-          const sixMonthsBefore = new Date(maxDate);
-          sixMonthsBefore.setMonth(maxDate.getMonth() - 6);
-          const formatDate = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
-          setDateRange({ start: formatDate(sixMonthsBefore), end: formatDate(maxDate) });
-        }
+        const dataRows = dataArray.slice(BD_HEADER_OFFSET);
+        const defaultRange = deriveDefaultDateRange(dataRows);
+        if (defaultRange) setDateRange(defaultRange);
         setRawData(dataRows);
       } catch (e) {
         // Auto-load silencieux
@@ -80,76 +78,15 @@ export default function Dashboard() {
     tryAutoLoad();
   }, []);
 
-  const allUniqueNames = useMemo(() => {
-    if (!rawData) return [];
-    const namesSet = new Set();
-    rawData.forEach((row) => {
-      [row[16], row[17], row[18]].forEach((name) => {
-        if (name && typeof name === 'string' && name.trim().length > 1) namesSet.add(name.trim());
-      });
-    });
-    return Array.from(namesSet).sort();
-  }, [rawData]);
+  const allUniqueNames = useMemo(() => collectUniqueNames(rawData), [rawData]);
 
-  const getNormalizedName = (rawName) => {
+  const getNormalizedName = useCallback((rawName) => {
     if (!rawName) return null;
     if (nameFusions[rawName]) return nameFusions[rawName];
     return rawName;
-  };
+  }, [nameFusions]);
 
-  const cdData = useMemo(() => {
-    if (!rawData) return [];
-    let cdId = 1;
-    const data = [];
-    for (const row of rawData) {
-      if (!row) continue;
-      let date = null;
-      const d = row[4];
-      if (d) date = d instanceof Date ? d : new Date(d);
-      if (!date || isNaN(date.getTime())) continue;
-      const dateStr = date.toISOString().split('T')[0];
-      const conf1 = getNormalizedName(row[16]);
-      const conf2 = getNormalizedName(row[17]);
-      if (!conf1 && !conf2) continue;
-      const tempsD1 = parseFloat(row[85]) || 0;
-      if (tempsD1 <= 0) continue;
-      
-      // Filtrer les proto ici directement
-      const typeProd = row[7] || 'N/A';
-      if (typeProd.toLowerCase() === 'proto') continue;
-      
-      let qualite = 'Niv1';
-      let qualiteInfo = null;
-      if (row[67]) { qualite = 'Niv3'; qualiteInfo = typeof row[67] === 'string' ? row[67] : "Pas d'informations"; }
-      else if (row[68]) { qualite = 'Niv2'; qualiteInfo = typeof row[68] === 'string' ? row[68] : "Pas d'informations"; }
-      const pannes = parseFloat(row[110]) || 0;
-      data.push({ 
-        id: cdId++, 
-        date: dateStr, 
-        week: row[3] || null, 
-        month: row[2] || null, 
-        year: row[1] || null, 
-        conf1, 
-        conf2, 
-        tempsD1, 
-        tempsD1Net: parseFloat(row[111]) || 0, 
-        qualite, 
-        qualiteInfo, 
-        isPanne: pannes > 0, 
-        dimension: row[14] || 'N/A', 
-        machine: row[6] || 'N/A', 
-        commentaire: row[64] || '', 
-        cqCW: row[100] || '', 
-        cqCX: row[101] || '', 
-        cqCY: row[102] || '', 
-        notesGarant: row[131] || '', 
-        typeMachine: row[5] || 'N/A', 
-        typeProd: typeProd, 
-        typeCD: row[8] || 'Normal' 
-      });
-    }
-    return data;
-  }, [rawData, nameFusions]);
+  const cdData = useMemo(() => buildCdEntries(rawData, getNormalizedName), [rawData, getNormalizedName]);
 
   const filteredCdData = useMemo(() => {
     let filtered = cdData;
@@ -316,7 +253,7 @@ export default function Dashboard() {
     else if (preset === '30d') start.setDate(end.getDate() - 30);
     else if (preset === '3m') start.setMonth(end.getMonth() - 3);
     else if (preset === '6m') start.setMonth(end.getMonth() - 6);
-    setDateRange({ start: start.toISOString().split('T')[0], end: end.toISOString().split('T')[0] });
+    setDateRange({ start: formatAsInputDate(start), end: formatAsInputDate(end) });
   }
 
   function toggleHideNiv3(cdId) {
