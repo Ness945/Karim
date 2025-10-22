@@ -33,7 +33,7 @@ export default function Dashboard() {
   const [searchOperator, setSearchOperator] = useState('');
   const [searchMachine, setSearchMachine] = useState('');
 
-  async function handleFileUpload(event) {
+  function handleFileUpload(event) {
     const file = event.target.files?.[0];
     if (!file) return;
     setIsLoading(true);
@@ -181,25 +181,8 @@ export default function Dashboard() {
 
   const sortedHistoricalCdData = useMemo(() => {
     if (!filteredCdData.length) return [];
-
-    const today = new Date();
-    const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
-
-    return [...filteredCdData].sort((a, b) => {
-      const timeA = new Date(`${a.date}T00:00:00`).getTime();
-      const timeB = new Date(`${b.date}T00:00:00`).getTime();
-
-      const aIsPastOrToday = timeA <= todayMidnight;
-      const bIsPastOrToday = timeB <= todayMidnight;
-
-      if (aIsPastOrToday && !bIsPastOrToday) return -1;
-      if (!aIsPastOrToday && bIsPastOrToday) return 1;
-
-      if (aIsPastOrToday && bIsPastOrToday) return timeB - timeA;
-      return timeA - timeB;
-    });
+    return [...filteredCdData].sort((a, b) => b.date.localeCompare(a.date));
   }, [filteredCdData]);
-
   const binomeStats = useMemo(() => {
     if (!binomeOperator) return [];
     const map = {};
