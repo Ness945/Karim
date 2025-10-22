@@ -179,6 +179,11 @@ export default function Dashboard() {
     return Object.values(grouped).map((g) => ({ ...g, avgTime: +(g.sumTime / g.total).toFixed(1) })).sort((a, b) => a.month.localeCompare(b.month));
   }, [filteredCdData]);
 
+  const sortedHistoricalCdData = useMemo(() => {
+    if (!filteredCdData.length) return [];
+    return [...filteredCdData].sort((a, b) => b.date.localeCompare(a.date));
+  }, [filteredCdData]);
+
   const binomeStats = useMemo(() => {
     if (!binomeOperator) return [];
     const map = {};
@@ -584,7 +589,7 @@ export default function Dashboard() {
                   <tr><th className="text-left py-3 px-3">Date</th><th className="text-left py-3 px-3">Conf1</th><th className="text-left py-3 px-3">Conf2</th><th className="text-center py-3 px-3">Temps</th><th className="text-center py-3 px-3">Qualité</th><th className="text-center py-3 px-3">CQ</th><th className="text-center py-3 px-3">N° Machine</th><th className="text-center py-3 px-3">Type Machine</th><th className="text-center py-3 px-3">Prod</th></tr>
                 </thead>
                 <tbody>
-                  {filteredCdData.map((cd) => {
+                  {sortedHistoricalCdData.map((cd) => {
                     const hasCQ = cd.cqCW || cd.cqCX || cd.cqCY;
                     return (
                     <tr key={cd.id} onClick={() => setSelectedCD(cd)} className="border-b hover:bg-slate-50 cursor-pointer">
