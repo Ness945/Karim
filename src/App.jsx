@@ -33,7 +33,7 @@ export default function Dashboard() {
   const [searchOperator, setSearchOperator] = useState('');
   const [searchMachine, setSearchMachine] = useState('');
 
-  async function handleFileUpload(event) {
+  function handleFileUpload(event) {
     const file = event.target.files?.[0];
     if (!file) return;
     setIsLoading(true);
@@ -183,7 +183,6 @@ export default function Dashboard() {
     if (!filteredCdData.length) return [];
     return [...filteredCdData].sort((a, b) => b.date.localeCompare(a.date));
   }, [filteredCdData]);
-
   const binomeStats = useMemo(() => {
     if (!binomeOperator) return [];
     const map = {};
