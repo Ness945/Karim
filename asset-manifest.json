@@ -1,0 +1,13 @@
+{
+  "files": {
+    "main.css": "/Karim/static/css/main.cf890fdb.css",
+    "main.js": "/Karim/static/js/main.65a35d17.js",
+    "index.html": "/Karim/index.html",
+    "main.cf890fdb.css.map": "/Karim/static/css/main.cf890fdb.css.map",
+    "main.65a35d17.js.map": "/Karim/static/js/main.65a35d17.js.map"
+  },
+  "entrypoints": [
+    "static/css/main.cf890fdb.css",
+    "static/js/main.65a35d17.js"
+  ]
+}
