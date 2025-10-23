@@ -25,6 +25,7 @@ export default function Dashboard() {
   const [searchOperator, setSearchOperator] = useState('');
   const [searchMachine, setSearchMachine] = useState('');
 
+  const [sortHistoryByDate, setSortHistoryByDate] = useState('recent'); // 'recent' ou 'oldest'
   async function handleFileUpload(event) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -163,6 +164,15 @@ export default function Dashboard() {
     if (filterMachine !== 'all') filtered = filtered.filter(cd => cd.machine === filterMachine);
     return filtered;
   }, [cdData, dateRange, filterTypeMachine, filterTypeProd, filterMachine]);
+
+  const sortedHistoryCdData = useMemo(() => {
+    const sorted = [...filteredCdData];
+    if (sortHistoryByDate === 'recent') {
+      return sorted.sort((a, b) => new Date(b.date) - new Date(a.date));
+    } else {
+      return sorted.sort((a, b) => new Date(a.date) - new Date(b.date));
+    }
+  }, [filteredCdData, sortHistoryByDate]);
 
   const uniqueTypeMachines = useMemo(() => { const types = new Set(); cdData.forEach(cd => types.add(cd.typeMachine)); return Array.from(types).sort(); }, [cdData]);
   const uniqueTypeProds = useMemo(() => { const types = new Set(); cdData.forEach(cd => types.add(cd.typeProd)); return Array.from(types).sort(); }, [cdData]);
@@ -641,13 +651,24 @@ export default function Dashboard() {
         {activeTab === 'historique' && (
           <div className="bg-white rounded-xl shadow-sm p-6">
             <h2 className="text-2xl font-bold mb-6">Liste des CD</h2>
+            <div className="mb-4 flex items-center gap-3">
+              <label className="text-sm font-medium text-slate-700">Trier par date :</label>
+              <select 
+                value={sortHistoryByDate} 
+                onChange={(e) => setSortHistoryByDate(e.target.value)}
+                className="px-4 py-2 border-2 border-slate-300 rounded-lg text-sm font-medium hover:border-blue-500 focus:border-blue-500 focus:outline-none transition-colors"
+              >
+                <option value="recent">Plus récents d'abord</option>
+                <option value="oldest">Plus anciens d'abord</option>
+              </select>
+            </div>
             <div className="overflow-auto max-h-[600px]">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-white border-b-2">
                   <tr><th className="text-left py-3 px-3">Date</th><th className="text-left py-3 px-3">Conf1</th><th className="text-left py-3 px-3">Conf2</th><th className="text-center py-3 px-3">Temps</th><th className="text-center py-3 px-3">Qualité</th><th className="text-center py-3 px-3">CQ</th><th className="text-center py-3 px-3">N° Machine</th><th className="text-center py-3 px-3">Type Machine</th><th className="text-center py-3 px-3">Prod</th></tr>
                 </thead>
                 <tbody>
-                  {filteredCdData.map((cd) => {
+                  {sortedHistoryCdData.map((cd) => {
                     const hasCQ = cd.cqCW || cd.cqCX || cd.cqCY;
                     return (
                     <tr key={cd.id} onClick={() => setSelectedCD(cd)} className="border-b hover:bg-slate-50 cursor-pointer">
@@ -678,7 +699,7 @@ export default function Dashboard() {
                 </tbody>
               </table>
             </div>
-            <p className="text-sm text-slate-600 mt-4 text-center">{filteredCdData.length} CD affichés</p>
+            <p className="text-sm text-slate-600 mt-4 text-center">{sortedHistoryCdData.length} CD affichés</p>
           </div>
         )}
 
