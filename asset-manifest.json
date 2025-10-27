@@ -1,13 +1,13 @@
 {
   "files": {
-    "main.css": "/Karim/static/css/main.a603b0a0.css",
-    "main.js": "/Karim/static/js/main.16dd93af.js",
+    "main.css": "/Karim/static/css/main.9cff8ede.css",
+    "main.js": "/Karim/static/js/main.d1eb387d.js",
     "index.html": "/Karim/index.html",
-    "main.a603b0a0.css.map": "/Karim/static/css/main.a603b0a0.css.map",
-    "main.16dd93af.js.map": "/Karim/static/js/main.16dd93af.js.map"
+    "main.9cff8ede.css.map": "/Karim/static/css/main.9cff8ede.css.map",
+    "main.d1eb387d.js.map": "/Karim/static/js/main.d1eb387d.js.map"
   },
   "entrypoints": [
-    "static/css/main.a603b0a0.css",
-    "static/js/main.16dd93af.js"
+    "static/css/main.9cff8ede.css",
+    "static/js/main.d1eb387d.js"
   ]
 }
