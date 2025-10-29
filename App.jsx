@@ -388,30 +388,44 @@ export default function Dashboard() {
       const cdAsConf2 = filteredCdData.filter((cd) => cd.conf2 === op);
       const allCD = [...cdAsConf1, ...cdAsConf2];
       if (!allCD.length) continue;
-      const avgTime = allCD.reduce((s, cd) => s + cd.tempsD1, 0) / allCD.length;
-      
-      // Calculer avgTimeNet en excluant les D1 NET = 0
-      const cdWithNet = allCD.filter(cd => cd.tempsD1Net > 0);
-      const avgTimeNet = cdWithNet.length > 0 
-        ? cdWithNet.reduce((s, cd) => s + cd.tempsD1Net, 0) / cdWithNet.length 
+
+      const visibleConf1 = cdAsConf1.filter(cd => !hiddenCdIds.has(cd.id));
+      const visibleConf2 = cdAsConf2.filter(cd => !hiddenCdIds.has(cd.id));
+      const visibleCD = [...visibleConf1, ...visibleConf2];
+      const totalVisible = visibleCD.length;
+      const totalAll = allCD.length;
+      const hiddenCount = totalAll - totalVisible;
+
+      const avgTime = totalVisible > 0
+        ? visibleCD.reduce((s, cd) => s + cd.tempsD1, 0) / totalVisible
         : 0;
-      
-      byOp[op] = { 
-        name: op, 
-        totalCD: allCD.length, 
-        asConf1: cdAsConf1.length, 
-        asConf2: cdAsConf2.length, 
+
+      // Calculer avgTimeNet en excluant les D1 NET = 0
+      const cdWithNet = visibleCD.filter(cd => cd.tempsD1Net > 0);
+      const avgTimeNet = cdWithNet.length > 0
+        ? cdWithNet.reduce((s, cd) => s + cd.tempsD1Net, 0) / cdWithNet.length
+        : 0;
+
+      byOp[op] = {
+        name: op,
+        totalCD: totalVisible,
+        totalAllCD: totalAll,
+        hiddenCD: hiddenCount,
+        asConf1: cdAsConf1.length,
+        asConf2: cdAsConf2.length,
+        visibleAsConf1: visibleConf1.length,
+        visibleAsConf2: visibleConf2.length,
         avgTime,
         avgTimeNet,
-        niv1: allCD.filter((cd) => cd.qualite === 'Niv1').length, 
-        niv2: allCD.filter((cd) => cd.qualite === 'Niv2').length, 
-        niv3: allCD.filter((cd) => cd.qualite === 'Niv3').length, 
-        cdListConf1: cdAsConf1, 
-        cdListConf2: cdAsConf2 
+        niv1: visibleCD.filter((cd) => cd.qualite === 'Niv1').length,
+        niv2: visibleCD.filter((cd) => cd.qualite === 'Niv2').length,
+        niv3: visibleCD.filter((cd) => cd.qualite === 'Niv3').length,
+        cdListConf1: cdAsConf1,
+        cdListConf2: cdAsConf2
       };
     }
     return Object.values(byOp);
-  }, [filteredCdData, operators]);
+  }, [filteredCdData, operators, hiddenCdIds]);
 
   const globalStats = useMemo(() => {
     const total = filteredCdData.length;
@@ -497,7 +511,8 @@ export default function Dashboard() {
 
   function evaluateOperatorPerformance(op) {
     const timePerf = op.avgTime <= thresholds.excellent ? 'excellent' : op.avgTime <= thresholds.good ? 'good' : op.avgTime <= thresholds.poor ? 'warning' : 'critical';
-    const niv3Pct = (op.niv3 / op.totalCD * 100);
+    const totalVisible = op.totalCD || 0;
+    const niv3Pct = totalVisible > 0 ? (op.niv3 / totalVisible * 100) : 0;
     const issues = [];
     if (niv3Pct > thresholds.maxNiv3Percent) issues.push(`Niv3: ${niv3Pct.toFixed(0)}% (max: ${thresholds.maxNiv3Percent}%)`);
     let status = timePerf;
@@ -539,7 +554,9 @@ export default function Dashboard() {
       'Niv1': op.niv1,
       'Niv2': op.niv2,
       'Niv3': op.niv3,
-      '% Niv3': ((op.niv3 / op.totalCD) * 100).toFixed(1),
+      '% Niv3': op.totalCD > 0 ? ((op.niv3 / op.totalCD) * 100).toFixed(1) : '0.0',
+      'CD masqués': op.hiddenCD,
+      'Total CD (brut)': op.totalAllCD,
       'CD Conf1 (PNC)': op.asConf1,
       'CD Conf2 (PNS)': op.asConf2
     }));
@@ -1454,10 +1471,25 @@ export default function Dashboard() {
                 <div className="bg-gradient-to-r from-blue-600 to-blue-700 rounded-xl shadow-lg p-6 text-white">
                   <h3 className="text-3xl font-bold mb-6 text-center">{selectedStat.name}</h3>
                   <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-                    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-lg text-center"><p className="text-sm opacity-90 mb-1">Total CD</p><p className="text-3xl font-bold">{selectedStat.totalCD}</p></div>
+                    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-lg text-center">
+                      <p className="text-sm opacity-90 mb-1">CD comptés</p>
+                      <p className="text-3xl font-bold">{selectedStat.totalCD}</p>
+                      <p className="text-xs opacity-80 mt-1">
+                        sur {selectedStat.totalAllCD} au total
+                        {selectedStat.hiddenCD > 0 && ` • ${selectedStat.hiddenCD} masqué${selectedStat.hiddenCD > 1 ? 's' : ''}`}
+                      </p>
+                    </div>
                     <div className="bg-white/10 backdrop-blur-sm p-4 rounded-lg text-center"><p className="text-sm opacity-90 mb-1">Temps Moyen</p><p className="text-3xl font-bold">{selectedStat.avgTime.toFixed(1)}h</p></div>
-                    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-lg text-center"><p className="text-sm opacity-90 mb-1">PNC (Conf1)</p><p className="text-3xl font-bold">{selectedStat.asConf1}</p></div>
-                    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-lg text-center"><p className="text-sm opacity-90 mb-1">PNS (Conf2)</p><p className="text-3xl font-bold">{selectedStat.asConf2}</p></div>
+                    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-lg text-center">
+                      <p className="text-sm opacity-90 mb-1">PNC (Conf1)</p>
+                      <p className="text-3xl font-bold">{selectedStat.visibleAsConf1}</p>
+                      <p className="text-xs opacity-80 mt-1">sur {selectedStat.asConf1}</p>
+                    </div>
+                    <div className="bg-white/10 backdrop-blur-sm p-4 rounded-lg text-center">
+                      <p className="text-sm opacity-90 mb-1">PNS (Conf2)</p>
+                      <p className="text-3xl font-bold">{selectedStat.visibleAsConf2}</p>
+                      <p className="text-xs opacity-80 mt-1">sur {selectedStat.asConf2}</p>
+                    </div>
                     <div className="bg-white/10 backdrop-blur-sm p-4 rounded-lg text-center"><p className="text-sm opacity-90 mb-1">Qualité</p><div className="flex justify-center gap-2 mt-1"><span className="bg-green-500 px-2 py-1 rounded text-sm font-bold">{selectedStat.niv1}</span><span className="bg-orange-500 px-2 py-1 rounded text-sm font-bold">{selectedStat.niv2}</span><span className="bg-red-500 px-2 py-1 rounded text-sm font-bold">{selectedStat.niv3}</span></div></div>
                   </div>
                 </div>
@@ -1467,7 +1499,7 @@ export default function Dashboard() {
                     <div>
                       <label className="block text-sm font-medium mb-3">Rôle de l'opérateur</label>
                       <div className="flex flex-wrap gap-2">
-                        <button onClick={() => setFeedbackRole('all')} className={`px-4 py-2 rounded-lg font-medium transition-all ${feedbackRole === 'all' ? 'bg-blue-600 text-white shadow-md' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>Tous ({selectedStat.totalCD})</button>
+                        <button onClick={() => setFeedbackRole('all')} className={`px-4 py-2 rounded-lg font-medium transition-all ${feedbackRole === 'all' ? 'bg-blue-600 text-white shadow-md' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>Tous ({selectedStat.totalAllCD})</button>
                         <button onClick={() => setFeedbackRole('conf1')} className={`px-4 py-2 rounded-lg font-medium transition-all ${feedbackRole === 'conf1' ? 'bg-green-600 text-white shadow-md' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>PNC ({selectedStat.asConf1})</button>
                         <button onClick={() => setFeedbackRole('conf2')} className={`px-4 py-2 rounded-lg font-medium transition-all ${feedbackRole === 'conf2' ? 'bg-orange-600 text-white shadow-md' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>PNS ({selectedStat.asConf2})</button>
                       </div>
@@ -1662,7 +1694,15 @@ export default function Dashboard() {
                   <tbody>
                     {[...operatorStats]
                       .filter(op => op.name.toLowerCase().includes(searchOperator.toLowerCase()))
-                      .sort((a, b) => sortByNet ? a.avgTimeNet - b.avgTimeNet : a.avgTime - b.avgTime)
+                      .sort((a, b) => {
+                        const valueA = sortByNet
+                          ? (a.totalCD > 0 ? a.avgTimeNet : Number.POSITIVE_INFINITY)
+                          : (a.totalCD > 0 ? a.avgTime : Number.POSITIVE_INFINITY);
+                        const valueB = sortByNet
+                          ? (b.totalCD > 0 ? b.avgTimeNet : Number.POSITIVE_INFINITY)
+                          : (b.totalCD > 0 ? b.avgTime : Number.POSITIVE_INFINITY);
+                        return valueA - valueB;
+                      })
                       .map((op, idx) => {
                       const evaluation = evaluateOperatorPerformance(op);
                       const displayTime = sortByNet ? op.avgTimeNet : op.avgTime;
@@ -1672,7 +1712,16 @@ export default function Dashboard() {
                           <td className="py-3 px-4">
                             <span className="font-bold text-base">{op.name}</span>
                           </td>
-                          <td className="py-3 px-4 text-center"><span className="text-lg font-semibold text-blue-600">{op.totalCD}</span></td>
+                          <td className="py-3 px-4 text-center">
+                            <div className="flex flex-col items-center leading-tight">
+                              <span className="text-lg font-semibold text-blue-600">{op.totalCD}</span>
+                              {op.hiddenCD > 0 && (
+                                <span className="text-xs text-slate-500 font-medium">
+                                  {op.totalAllCD} au total • {op.hiddenCD} masqué{op.hiddenCD > 1 ? 's' : ''}
+                                </span>
+                              )}
+                            </div>
+                          </td>
                           <td className="py-3 px-4 text-center"><span className="text-2xl font-bold" style={{ color: getTimeColor(displayTime) }}>{displayTime.toFixed(1)}h</span></td>
                           <td className="py-3 px-4">
                             <div className="flex flex-col items-center gap-1">
