@@ -8,9 +8,69 @@ const cleanName = (value) => {
   return value.replace(/\s+/g, ' ').trim();
 };
 
-const normalizeNameKey = (value) => {
+const stripDiacritics = (value) => value.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+const normalizeForComparison = (value) => {
   const cleaned = cleanName(value);
-  return cleaned ? cleaned.toLocaleLowerCase('fr-FR') : '';
+  if (!cleaned) return '';
+  return stripDiacritics(cleaned).toLocaleLowerCase('fr-FR');
+};
+
+const normalizeNameKey = (value) => normalizeForComparison(value);
+
+const getCommonPrefixLength = (s1, s2) => {
+  const maxPrefix = Math.min(4, s1.length, s2.length);
+  let count = 0;
+  while (count < maxPrefix && s1[count] === s2[count]) {
+    count++;
+  }
+  return count;
+};
+
+const jaroDistance = (s1, s2) => {
+  if (!s1 || !s2) return 0;
+  const len1 = s1.length;
+  const len2 = s2.length;
+  if (len1 === 0 && len2 === 0) return 1;
+  const matchDistance = Math.floor(Math.max(len1, len2) / 2) - 1;
+
+  const s1Matches = new Array(len1).fill(false);
+  const s2Matches = new Array(len2).fill(false);
+
+  let matches = 0;
+  for (let i = 0; i < len1; i++) {
+    const start = Math.max(0, i - matchDistance);
+    const end = Math.min(i + matchDistance + 1, len2);
+    for (let j = start; j < end; j++) {
+      if (s2Matches[j]) continue;
+      if (s1[i] !== s2[j]) continue;
+      s1Matches[i] = true;
+      s2Matches[j] = true;
+      matches++;
+      break;
+    }
+  }
+
+  if (matches === 0) return 0;
+
+  let transpositions = 0;
+  let k = 0;
+  for (let i = 0; i < len1; i++) {
+    if (!s1Matches[i]) continue;
+    while (!s2Matches[k]) k++;
+    if (s1[i] !== s2[k]) transpositions++;
+    k++;
+  }
+
+  const jaro = (matches / len1 + matches / len2 + (matches - transpositions / 2) / matches) / 3;
+  return jaro;
+};
+
+const jaroWinkler = (s1, s2) => {
+  if (!s1 || !s2) return 0;
+  const jaro = jaroDistance(s1, s2);
+  const prefix = getCommonPrefixLength(s1, s2);
+  return jaro + prefix * 0.1 * (1 - jaro);
 };
 
 const sanitizeFusionMap = (map) => {
@@ -42,6 +102,7 @@ export default function Dashboard() {
   const [dateRange, setDateRange] = useState(null);
   const [rawData, setRawData] = useState(null);
   const [nameFusions, setNameFusions] = useState({});
+  const [mergeHistory, setMergeHistory] = useState([]);
   const [sortByNet, setSortByNet] = useState(false);
   const [searchOperator, setSearchOperator] = useState('');
   const [searchMachine, setSearchMachine] = useState('');
@@ -144,6 +205,27 @@ export default function Dashboard() {
       const previous = sanitizeFusionMap(prev);
       const next = typeof updater === 'function' ? updater(previous) : updater;
       return sanitizeFusionMap(next);
+    });
+  };
+
+  const logMergeHistory = (entry) => {
+    setMergeHistory((prev) => [entry, ...prev]);
+  };
+
+  const rollbackMerge = (mergeId) => {
+    setMergeHistory((prev) => {
+      const entry = prev.find((item) => item.id === mergeId);
+      if (entry) {
+        updateNameFusions((current) => {
+          const updated = { ...current };
+          entry.aliases.forEach((alias) => {
+            const cleanedAlias = cleanName(alias);
+            if (cleanedAlias) delete updated[cleanedAlias];
+          });
+          return updated;
+        });
+      }
+      return prev.filter((item) => item.id !== mergeId);
     });
   };
 
@@ -499,87 +581,538 @@ export default function Dashboard() {
     { id: 'admin', name: 'Admin', icon: Shield }
   ];
 
-  function NameFusionManager({ allNames, nameFusions, setNameFusions }) {
-    const [selectedNames, setSelectedNames] = useState([]);
-    const [targetName, setTargetName] = useState('');
+  function NameFusionManager({ allNames, nameFusions, setNameFusions, cdData, mergeHistory, onLogMerge, onRollback }) {
     const [searchTerm, setSearchTerm] = useState('');
+    const [canonicalName, setCanonicalName] = useState('');
+    const [selectedVariants, setSelectedVariants] = useState([]);
+    const [preview, setPreview] = useState(null);
+    const [fuzzyThreshold, setFuzzyThreshold] = useState(0.88);
+    const [feedback, setFeedback] = useState(null);
+
     const uniqueNames = useMemo(() => {
       const cleaned = allNames.map(cleanName).filter(Boolean);
       return Array.from(new Set(cleaned)).sort((a, b) => a.localeCompare(b, 'fr', { sensitivity: 'base' }));
     }, [allNames]);
-    const filteredNames = uniqueNames.filter(name => name.toLocaleLowerCase('fr-FR').includes(searchTerm.toLocaleLowerCase('fr-FR')));
-    const toggleName = (name) => setSelectedNames(prev => prev.includes(name) ? prev.filter(n => n !== name) : [...prev, name]);
-    const createFusion = () => {
-      const cleanedTarget = cleanName(targetName);
-      if (selectedNames.length < 2 || !cleanedTarget) { alert('Sélectionnez au moins 2 noms et définissez le nom cible'); return; }
+
+    const usageStats = useMemo(() => {
+      const stats = {};
+      cdData.forEach((cd) => {
+        [cd.conf1, cd.conf2].forEach((rawName, index) => {
+          const cleaned = cleanName(rawName);
+          if (!cleaned) return;
+          if (!stats[cleaned]) {
+            stats[cleaned] = {
+              name: cleaned,
+              count: 0,
+              totalTime: 0,
+              totalTimeNet: 0,
+              niv1: 0,
+              niv2: 0,
+              niv3: 0,
+              asConf1: 0,
+              asConf2: 0
+            };
+          }
+          stats[cleaned].count += 1;
+          stats[cleaned].totalTime += cd.tempsD1 || 0;
+          if (cd.tempsD1Net > 0) stats[cleaned].totalTimeNet += cd.tempsD1Net || 0;
+          if (cd.qualite === 'Niv1') stats[cleaned].niv1 += 1;
+          if (cd.qualite === 'Niv2') stats[cleaned].niv2 += 1;
+          if (cd.qualite === 'Niv3') stats[cleaned].niv3 += 1;
+          if (index === 0) stats[cleaned].asConf1 += 1;
+          if (index === 1) stats[cleaned].asConf2 += 1;
+        });
+      });
+      return stats;
+    }, [cdData]);
+
+    const groupedFusions = useMemo(() => {
+      const groups = {};
+      Object.entries(nameFusions).forEach(([alias, canonical]) => {
+        const cleanedAlias = cleanName(alias);
+        const cleanedCanonical = cleanName(canonical);
+        if (!cleanedAlias || !cleanedCanonical) return;
+        if (!groups[cleanedCanonical]) groups[cleanedCanonical] = new Set();
+        groups[cleanedCanonical].add(cleanedAlias);
+      });
+      return Object.entries(groups)
+        .map(([canonical, aliases]) => {
+          const aliasList = Array.from(aliases).sort((a, b) => a.localeCompare(b, 'fr', { sensitivity: 'base' }));
+          const usage = aliasList.reduce((sum, alias) => sum + (usageStats[alias]?.count ?? 0), 0);
+          return { canonical, aliases: aliasList, usage };
+        })
+        .sort((a, b) => a.canonical.localeCompare(b.canonical, 'fr', { sensitivity: 'base' }));
+    }, [nameFusions, usageStats]);
+
+    const filteredNames = useMemo(() => {
+      if (!searchTerm) return uniqueNames;
+      const normalizedSearch = normalizeForComparison(searchTerm);
+      return uniqueNames.filter((name) => normalizeForComparison(name).includes(normalizedSearch));
+    }, [uniqueNames, searchTerm]);
+
+    const suggestedVariants = useMemo(() => {
+      if (!canonicalName) return [];
+      const normalizedCanonical = normalizeForComparison(canonicalName);
+      if (!normalizedCanonical) return [];
+      return uniqueNames
+        .filter((name) => normalizeForComparison(name) !== normalizedCanonical)
+        .map((name) => ({
+          name,
+          score: jaroWinkler(normalizedCanonical, normalizeForComparison(name)),
+          usage: usageStats[name]?.count ?? 0
+        }))
+        .filter((candidate) => candidate.score >= fuzzyThreshold)
+        .sort((a, b) => {
+          if (b.score !== a.score) return b.score - a.score;
+          return (b.usage ?? 0) - (a.usage ?? 0);
+        })
+        .slice(0, 12);
+    }, [canonicalName, uniqueNames, usageStats, fuzzyThreshold]);
+
+    const toggleVariant = (name) => {
+      const cleaned = cleanName(name);
+      if (!cleaned) return;
+      setSelectedVariants((prev) => (prev.includes(cleaned) ? prev.filter((n) => n !== cleaned) : [...prev, cleaned]));
+      setFeedback(null);
+    };
+
+    const buildPreview = () => {
+      const cleanedCanonical = cleanName(canonicalName);
+      const canonicalNormalized = normalizeForComparison(cleanedCanonical);
+      const aliasList = Array.from(new Set(selectedVariants.map(cleanName).filter(Boolean))).filter(
+        (alias) => alias !== cleanedCanonical
+      );
+      if (!cleanedCanonical) {
+        setFeedback({ type: 'error', text: 'Veuillez saisir un nom canonique.' });
+        return null;
+      }
+      if (!aliasList.length) {
+        setFeedback({ type: 'error', text: 'Sélectionnez au moins une variante à fusionner.' });
+        return null;
+      }
+      const aliasNormalizedSet = new Set(aliasList.map((alias) => normalizeForComparison(alias)).filter(Boolean));
+      const impactedCdIds = new Set();
+      const breakdown = {};
+      cdData.forEach((cd) => {
+        let impacted = false;
+        [cd.conf1, cd.conf2].forEach((rawName, index) => {
+          const cleaned = cleanName(rawName);
+          if (!cleaned) return;
+          const normalized = normalizeForComparison(cleaned);
+          const isAlias = aliasNormalizedSet.has(normalized);
+          const isCanonical = normalized === canonicalNormalized;
+          if (!isAlias && !isCanonical) return;
+          impacted = true;
+          const bucket = isCanonical ? cleanedCanonical : cleaned;
+          if (!breakdown[bucket]) {
+            breakdown[bucket] = {
+              name: bucket,
+              count: 0,
+              totalTime: 0,
+              totalTimeNet: 0,
+              niv1: 0,
+              niv2: 0,
+              niv3: 0,
+              asConf1: 0,
+              asConf2: 0,
+              role: new Set()
+            };
+          }
+          breakdown[bucket].count += 1;
+          breakdown[bucket].totalTime += cd.tempsD1 || 0;
+          if (cd.tempsD1Net > 0) breakdown[bucket].totalTimeNet += cd.tempsD1Net || 0;
+          if (cd.qualite === 'Niv1') breakdown[bucket].niv1 += 1;
+          if (cd.qualite === 'Niv2') breakdown[bucket].niv2 += 1;
+          if (cd.qualite === 'Niv3') breakdown[bucket].niv3 += 1;
+          if (index === 0) breakdown[bucket].asConf1 += 1;
+          if (index === 1) breakdown[bucket].asConf2 += 1;
+          breakdown[bucket].role.add(index === 0 ? 'conf1' : 'conf2');
+        });
+        if (impacted) impactedCdIds.add(cd.id);
+      });
+
+      const breakdownList = Object.values(breakdown).map((item) => ({
+        ...item,
+        role: Array.from(item.role)
+      }));
+
+      const totals = breakdownList.reduce(
+        (acc, item) => ({
+          count: acc.count + item.count,
+          totalTime: acc.totalTime + item.totalTime,
+          totalTimeNet: acc.totalTimeNet + item.totalTimeNet,
+          niv1: acc.niv1 + item.niv1,
+          niv2: acc.niv2 + item.niv2,
+          niv3: acc.niv3 + item.niv3
+        }),
+        { count: 0, totalTime: 0, totalTimeNet: 0, niv1: 0, niv2: 0, niv3: 0 }
+      );
+
+      const result = {
+        canonical: cleanedCanonical,
+        canonicalNormalized,
+        aliases: aliasList,
+        impactedCdCount: impactedCdIds.size,
+        breakdown: breakdownList.sort((a, b) => b.count - a.count),
+        totals
+      };
+      setPreview(result);
+      return result;
+    };
+
+    const handleDryRun = () => {
+      const result = buildPreview();
+      if (result) {
+        setFeedback({
+          type: 'info',
+          text: `${result.aliases.length} variante(s) fusionnée(s) vers « ${result.canonical} ». ${result.impactedCdCount} CD impactés (aperçu seulement).`
+        });
+      }
+    };
+
+    const generateMergeId = () => {
+      try {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+          return crypto.randomUUID();
+        }
+      } catch (e) {
+        // ignore
+      }
+      return `merge-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    };
+
+    const handleMerge = () => {
+      const result = preview ?? buildPreview();
+      if (!result) return;
       setNameFusions((current) => {
         const updated = { ...current };
-        selectedNames.forEach(name => {
-          const cleanedSource = cleanName(name);
-          if (!cleanedSource || cleanedSource === cleanedTarget) return;
-          updated[cleanedSource] = cleanedTarget;
+        result.aliases.forEach((alias) => {
+          const cleanedAlias = cleanName(alias);
+          if (!cleanedAlias || cleanedAlias === result.canonical) return;
+          updated[cleanedAlias] = result.canonical;
         });
         return updated;
       });
-      setSelectedNames([]);
-      setTargetName('');
+      const entry = {
+        id: generateMergeId(),
+        canonical: result.canonical,
+        aliases: result.aliases,
+        impactedCdCount: result.impactedCdCount,
+        totals: result.totals,
+        breakdown: result.breakdown,
+        createdAt: new Date().toISOString()
+      };
+      if (onLogMerge) onLogMerge(entry);
+      setFeedback({
+        type: 'success',
+        text: `Fusion appliquée. ${result.aliases.length} alias redirigés vers « ${result.canonical} ».`
+      });
+      setSelectedVariants([]);
+      setPreview(result);
     };
-    const deleteFusion = (sourceName) => {
-      const cleanedSource = cleanName(sourceName);
-      if (!cleanedSource) return;
+
+    const handleDeleteFusion = (aliasName) => {
+      const cleanedAlias = cleanName(aliasName);
+      if (!cleanedAlias) return;
       setNameFusions((current) => {
         const updated = { ...current };
-        delete updated[cleanedSource];
+        delete updated[cleanedAlias];
         return updated;
       });
     };
-    const existingFusions = Object.entries(nameFusions)
-      .filter(([source, target]) => source && target)
-      .sort((a, b) => a[0].localeCompare(b[0], 'fr', { sensitivity: 'base' }));
+
+    const clearSelection = () => {
+      setSelectedVariants([]);
+      setPreview(null);
+      setFeedback(null);
+    };
+
     return (
-      <div className="space-y-4">
-        {existingFusions.length > 0 && (
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <h4 className="font-semibold text-blue-900 mb-3">Fusions actives ({existingFusions.length})</h4>
-            <div className="space-y-2 max-h-48 overflow-y-auto">
-              {existingFusions.map(([source, target]) => (
-                <div key={source} className="flex items-center justify-between bg-white p-2 rounded border">
-                  <span className="text-sm"><span className="text-slate-600">{source}</span><span className="mx-2 text-blue-600">→</span><span className="font-semibold text-blue-900">{target}</span></span>
-                  <button onClick={() => deleteFusion(source)} className="text-red-600 hover:text-red-800 px-2 py-1"><X size={16} /></button>
+      <div className="space-y-6">
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+          <div className="xl:col-span-2 space-y-4">
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-4">
+              <div className="flex flex-col md:flex-row md:items-end gap-3">
+                <div className="flex-1">
+                  <label className="block text-xs font-semibold uppercase text-slate-500 mb-2">Nom canonique</label>
+                  <input
+                    type="text"
+                    value={canonicalName}
+                    onChange={(e) => {
+                      setCanonicalName(e.target.value);
+                      setFeedback(null);
+                    }}
+                    placeholder="Saisir ou sélectionner le nom de référence"
+                    className="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
                 </div>
-              ))}
-            </div>
-          </div>
-        )}
-        <div className="border-2 border-dashed border-slate-300 rounded-lg p-4">
-          <h4 className="font-semibold mb-3">Créer une nouvelle fusion</h4>
-          <div className="mb-4">
-            <input type="text" placeholder="Rechercher un nom..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full px-3 py-2 border rounded-lg" />
-          </div>
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mb-4 max-h-64 overflow-y-auto p-2 bg-slate-50 rounded">
-            {filteredNames.map(name => (
-              <label key={name} className={`flex items-center gap-2 p-2 rounded cursor-pointer transition-colors ${selectedNames.includes(name) ? 'bg-blue-100 border-2 border-blue-500' : 'bg-white border border-slate-200 hover:bg-slate-100'}`}>
-                <input type="checkbox" checked={selectedNames.includes(name)} onChange={() => toggleName(name)} className="w-4 h-4" />
-                <span className="text-sm">{name}</span>
-              </label>
-            ))}
-          </div>
-          {selectedNames.length > 0 && (
-            <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-4">
-              <p className="text-sm text-green-800 font-medium mb-2">{selectedNames.length} nom(s) sélectionné(s) :</p>
-              <div className="flex flex-wrap gap-1">
-                {selectedNames.map(name => <span key={name} className="bg-green-200 text-green-900 px-2 py-1 rounded text-xs font-medium">{name}</span>)}
+                <div className="md:w-48">
+                  <label className="block text-xs font-semibold uppercase text-slate-500 mb-2">Seuil de similarité</label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="range"
+                      min="0.5"
+                      max="0.99"
+                      step="0.01"
+                      value={fuzzyThreshold}
+                      onChange={(e) => setFuzzyThreshold(parseFloat(e.target.value))}
+                      className="flex-1"
+                    />
+                    <span className="text-xs font-semibold text-slate-600">{Math.round(fuzzyThreshold * 100)}%</span>
+                  </div>
+                </div>
               </div>
+              {suggestedVariants.length > 0 && (
+                <div className="bg-white border border-blue-100 rounded-lg p-3">
+                  <p className="text-xs font-semibold text-blue-700 mb-2 flex items-center gap-2">
+                    <Filter size={14} /> Variantes suggérées ({suggestedVariants.length})
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {suggestedVariants.map(({ name, score, usage }) => (
+                      <button
+                        key={name}
+                        onClick={() => toggleVariant(name)}
+                        className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${
+                          selectedVariants.includes(name)
+                            ? 'bg-blue-600 text-white border-blue-600'
+                            : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
+                        }`}
+                      >
+                        {name}
+                        <span className="ml-2 text-[10px] font-normal text-blue-200/80">
+                          {(score * 100).toFixed(0)}% · {usage} CD
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="space-y-3">
+                <div>
+                  <label className="block text-xs font-semibold uppercase text-slate-500 mb-2">Recherche de variantes</label>
+                  <input
+                    type="text"
+                    value={searchTerm}
+                    onChange={(e) => setSearchTerm(e.target.value)}
+                    placeholder="Rechercher un opérateur, ex: martin"
+                    className="w-full px-4 py-2.5 rounded-lg border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto">
+                  {filteredNames.map((name) => {
+                    const isSelected = selectedVariants.includes(name);
+                    const stats = usageStats[name];
+                    return (
+                      <label
+                        key={name}
+                        className={`flex items-center justify-between gap-2 px-3 py-2 rounded-lg border text-sm cursor-pointer transition ${
+                          isSelected
+                            ? 'border-blue-600 bg-blue-50 text-blue-900'
+                            : 'border-slate-200 bg-white hover:border-blue-200'
+                        }`}
+                      >
+                        <span className="font-medium truncate">{name}</span>
+                        <div className="flex items-center gap-2">
+                          {stats && (
+                            <span className="text-[11px] text-slate-500 bg-slate-100 px-2 py-0.5 rounded-full">{stats.count} CD</span>
+                          )}
+                          <input
+                            type="checkbox"
+                            className="w-4 h-4"
+                            checked={isSelected}
+                            onChange={() => toggleVariant(name)}
+                          />
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+              {selectedVariants.length > 0 && (
+                <div className="bg-green-50 border border-green-200 rounded-lg p-4">
+                  <div className="flex justify-between items-start mb-2">
+                    <p className="text-sm font-semibold text-green-800">
+                      {selectedVariants.length} variante(s) sélectionnée(s)
+                    </p>
+                    <button onClick={clearSelection} className="text-xs text-green-700 hover:text-green-900">Tout effacer</button>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {selectedVariants.map((name) => (
+                      <span key={name} className="bg-white border border-green-300 text-green-700 px-2 py-1 rounded-full text-xs font-semibold">
+                        {name}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div className="flex flex-wrap gap-3">
+                <button
+                  onClick={handleDryRun}
+                  className="px-4 py-2 rounded-lg border border-blue-300 text-blue-700 font-semibold hover:bg-blue-50 flex items-center gap-2"
+                >
+                  <Eye size={16} /> Aperçu (dry-run)
+                </button>
+                <button
+                  onClick={handleMerge}
+                  className="px-5 py-2 rounded-lg bg-blue-600 text-white font-semibold hover:bg-blue-700 flex items-center gap-2"
+                >
+                  <Shield size={16} /> Fusionner définitivement
+                </button>
+              </div>
+              {feedback && (
+                <div
+                  className={`border rounded-lg p-3 text-sm ${
+                    feedback.type === 'error'
+                      ? 'bg-red-50 border-red-200 text-red-700'
+                      : feedback.type === 'success'
+                      ? 'bg-green-50 border-green-200 text-green-700'
+                      : 'bg-blue-50 border-blue-200 text-blue-700'
+                  }`}
+                >
+                  {feedback.text}
+                </div>
+              )}
             </div>
-          )}
-          <div className="flex gap-3">
-            <input type="text" placeholder="Nom cible (ex: DUPONT Jean)" value={targetName} onChange={(e) => setTargetName(e.target.value)} className="flex-1 px-4 py-2 border-2 border-blue-300 rounded-lg font-semibold" />
-            <button onClick={createFusion} disabled={selectedNames.length < 2 || !targetName.trim()} className="px-6 py-2 bg-blue-600 text-white rounded-lg font-semibold hover:bg-blue-700 disabled:bg-slate-300 disabled:cursor-not-allowed">Fusionner</button>
+            {preview && (
+              <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-lg font-semibold text-slate-900">Résumé dry-run</h3>
+                    <p className="text-sm text-slate-500">
+                      {preview.impactedCdCount} CD seront réassignés vers « {preview.canonical} ».
+                    </p>
+                  </div>
+                  <div className="text-right">
+                    <p className="text-xs uppercase text-slate-400">Total CD fusionnés</p>
+                    <p className="text-2xl font-bold text-blue-700">{preview.totals.count}</p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="bg-blue-50 rounded-lg p-3">
+                    <p className="text-xs font-semibold text-blue-600 uppercase">Temps cumulé</p>
+                    <p className="text-xl font-bold text-blue-900">{preview.totals.totalTime.toFixed(1)} h</p>
+                  </div>
+                  <div className="bg-emerald-50 rounded-lg p-3">
+                    <p className="text-xs font-semibold text-emerald-600 uppercase">Temps NET</p>
+                    <p className="text-xl font-bold text-emerald-900">{preview.totals.totalTimeNet.toFixed(1)} h</p>
+                  </div>
+                  <div className="bg-amber-50 rounded-lg p-3">
+                    <p className="text-xs font-semibold text-amber-600 uppercase">Répartition qualité</p>
+                    <p className="text-sm text-amber-900">
+                      Niv1 {preview.totals.niv1} · Niv2 {preview.totals.niv2} · Niv3 {preview.totals.niv3}
+                    </p>
+                  </div>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-xs uppercase text-slate-400">
+                        <th className="py-2 pr-4">Nom observé</th>
+                        <th className="py-2 pr-4">CD</th>
+                        <th className="py-2 pr-4">Temps D1</th>
+                        <th className="py-2 pr-4">Temps NET</th>
+                        <th className="py-2 pr-4">Qualité</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {preview.breakdown.map((item) => (
+                        <tr key={item.name} className="border-t border-slate-100">
+                          <td className="py-2 pr-4 font-semibold text-slate-800">{item.name}</td>
+                          <td className="py-2 pr-4">{item.count}</td>
+                          <td className="py-2 pr-4">{item.totalTime.toFixed(1)} h</td>
+                          <td className="py-2 pr-4">{item.totalTimeNet.toFixed(1)} h</td>
+                          <td className="py-2 pr-4">
+                            <span className="bg-slate-100 text-slate-700 px-2 py-0.5 rounded-full text-xs">
+                              N1 {item.niv1} · N2 {item.niv2} · N3 {item.niv3}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-xs text-slate-500">
+                  Les totaux resteront inchangés : seules les références seront réattribuées au nom canonique choisi.
+                </p>
+              </div>
+            )}
+          </div>
+          <div className="space-y-4">
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <h3 className="text-lg font-semibold text-slate-900 mb-3">Journal des fusions</h3>
+              {mergeHistory.length === 0 ? (
+                <p className="text-sm text-slate-500">Aucune fusion appliquée pour le moment.</p>
+              ) : (
+                <div className="space-y-3 max-h-80 overflow-y-auto pr-1">
+                  {mergeHistory.map((entry) => (
+                    <div key={entry.id} className="border border-slate-200 rounded-lg p-3">
+                      <div className="flex justify-between items-start gap-2 mb-2">
+                        <div>
+                          <p className="text-sm font-semibold text-slate-800">{entry.canonical}</p>
+                          <p className="text-xs text-slate-500">{entry.aliases.length} alias · {entry.impactedCdCount} CD impactés</p>
+                        </div>
+                        <button
+                          onClick={() => onRollback && onRollback(entry.id)}
+                          className="text-xs text-red-600 hover:text-red-800"
+                        >
+                          Annuler
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-500 mb-2">{new Date(entry.createdAt).toLocaleString('fr-FR')}</p>
+                      <div className="flex flex-wrap gap-1 mb-2">
+                        {entry.aliases.map((alias) => (
+                          <span key={alias} className="text-[11px] bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">
+                            {alias}
+                          </span>
+                        ))}
+                      </div>
+                      <p className="text-[11px] text-slate-500">
+                        {entry.totals.totalTime.toFixed(1)} h cumulées · N3 {entry.totals.niv3}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 space-y-3">
+              <h3 className="text-sm font-semibold text-blue-900">Fusions actives</h3>
+              {groupedFusions.length === 0 ? (
+                <p className="text-xs text-blue-800">Aucun alias enregistré pour le moment.</p>
+              ) : (
+                <div className="space-y-3 max-h-72 overflow-y-auto">
+                  {groupedFusions.map((group) => (
+                    <div key={group.canonical} className="bg-white border border-blue-100 rounded-lg p-3 space-y-2">
+                      <div className="flex justify-between items-start">
+                        <div>
+                          <p className="text-sm font-semibold text-blue-900">{group.canonical}</p>
+                          <p className="text-xs text-blue-600">{group.aliases.length} alias · {group.usage} CD historiques</p>
+                        </div>
+                      </div>
+                      <div className="flex flex-wrap gap-1">
+                        {group.aliases.map((alias) => (
+                          <button
+                            key={alias}
+                            onClick={() => handleDeleteFusion(alias)}
+                            className="text-[11px] px-2 py-1 rounded-full border border-blue-200 text-blue-700 hover:bg-blue-100"
+                          >
+                            {alias} ✕
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <p className="text-[11px] text-blue-800/80">
+                Toute nouvelle donnée importée correspondant à un alias actif sera automatiquement redirigée vers le nom canonique.
+              </p>
+            </div>
           </div>
         </div>
       </div>
     );
   }
+
 
   if (isLoading) {
     return (
@@ -1323,7 +1856,15 @@ export default function Dashboard() {
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h2 className="text-2xl font-bold mb-2 flex items-center gap-2"><span>🔗</span> Fusion de Noms</h2>
               <p className="text-sm text-slate-600 mb-4">Regroupez plusieurs variantes d'un même nom en un seul nom normalisé.</p>
-              <NameFusionManager allNames={allUniqueNames} nameFusions={fusionLookups.direct} setNameFusions={updateNameFusions} />
+              <NameFusionManager
+                allNames={allUniqueNames}
+                nameFusions={fusionLookups.direct}
+                setNameFusions={updateNameFusions}
+                cdData={cdData}
+                mergeHistory={mergeHistory}
+                onLogMerge={logMergeHistory}
+                onRollback={rollbackMerge}
+              />
             </div>
             <div className="bg-white rounded-xl shadow-sm p-6">
               <h2 className="text-2xl font-bold mb-2 flex items-center gap-2"><span>⚙️</span> Seuils de Performance</h2>
